@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>台灣股票預測系統</title>
+  <link rel="icon" type="image/svg+xml"
+    href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📈</text></svg>" />
+</head>
+<body>
+  <div id="app">
+    <header class="header">
+      <div class="header-inner">
+        <div class="logo">📈 台灣股票預測系統</div>
+        <div class="header-sub">
+          AI 三模型集成 · 開盤跳空 85%+ · 情緒分析 · Ollama qwen3:14b
+        </div>
+      </div>
+    </header>
+
+    <section class="search-card">
+      <label class="search-label">輸入股票代碼</label>
+      <div class="search-row">
+        <input id="stock-input" type="text"
+          placeholder="如：2412、2330、0050"
+          maxlength="6" autocomplete="off" spellcheck="false" />
+        <button id="predict-btn" class="btn-primary">
+          <span>🔍</span><span>分析預測</span>
+        </button>
+      </div>
+      <div class="quick-label">快速選股</div>
+      <div id="quick-stocks" class="quick-stocks"></div>
+    </section>
+
+    <section id="result-section" class="hidden"></section>
+
+    <footer class="footer">
+      <p>⚠ 本系統僅供研究參考，不構成任何投資建議</p>
+      <p>資料：FinMind · 模型：LightGBM + XGBoost + CatBoost · 情緒：BERT · 分析：Ollama qwen3:14b</p>
+    </footer>
+  </div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
