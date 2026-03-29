@@ -121,13 +121,20 @@ def _atr(h, l, c, n=14):
 # DATA LOADING
 # ─────────────────────────────────────────────────────────────
 _API: Optional[FMLoader] = None
+_API_TOKEN: Optional[str] = None
 
 def _get_api(token=None) -> FMLoader:
-    global _API
+    global _API, _API_TOKEN
+    effective_token = token or os.environ.get("FINMIND_TOKEN") or None
     if _API is None:
         _API = FMLoader()
-        if token:
-            _API.login_by_token(api_token=token)
+        _API_TOKEN = effective_token
+        if effective_token:
+            _API.login_by_token(api_token=effective_token)
+    elif effective_token and effective_token != _API_TOKEN:
+        # Token changed — re-authenticate
+        _API.login_by_token(api_token=effective_token)
+        _API_TOKEN = effective_token
     return _API
 
 
@@ -167,7 +174,8 @@ def load_spy(token=None) -> Optional[pd.DataFrame]:
     api = _get_api(token)
     logger.info("  Loading SPY …")
     try:
-        spy = api.us_stock_price(stock_id="SPY", start_date="2004-01-01", end_date="2024-12-31")
+        today = __import__("datetime").date.today().strftime("%Y-%m-%d")
+        spy = api.us_stock_price(stock_id="SPY", start_date="2004-01-01", end_date=today)
         if spy is None or len(spy) == 0:
             return None
         spy["date"] = pd.to_datetime(spy["date"])
@@ -204,7 +212,8 @@ def load_sector(token=None) -> Optional[pd.DataFrame]:
     api = _get_api(token)
     logger.info("  Loading 0050 (sector/market context) …")
     try:
-        s = api.taiwan_stock_daily(stock_id="0050", start_date="2004-01-01", end_date="2024-12-31")
+        today = __import__("datetime").date.today().strftime("%Y-%m-%d")
+        s = api.taiwan_stock_daily(stock_id="0050", start_date="2004-01-01", end_date=today)
         if s is None or len(s) == 0:
             return None
         s["date"] = pd.to_datetime(s["date"])

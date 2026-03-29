@@ -1,0 +1,15 @@
+FinMind
+fastapi
+uvicorn[standard]
+pydantic
+pandas
+numpy
+scikit-learn
+lightgbm
+xgboost
+catboost
+imbalanced-learn
+transformers
+torch
+duckduckgo-search
+requests

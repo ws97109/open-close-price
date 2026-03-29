@@ -341,7 +341,7 @@ async def analyze_stock(req: AnalyzeRequest):
 
 
 @app.get("/api/chart/{stock_id}")
-def chart_data(stock_id: str, days: int = 120, token: str = None):
+def chart_data(stock_id: str, days: int = 120, token: Optional[str] = None):
     """
     Return OHLCV candlestick data for the last `days` trading days,
     plus walk-forward model probability series and tomorrow's prediction band.
@@ -471,9 +471,6 @@ def chart_data(stock_id: str, days: int = 120, token: str = None):
             return [{"time": int(r["date"].timestamp()), "value": round(float(r[col]), 2)}
                     for _, r in sub.iterrows()]
 
-        ma_lines = {
-            "ma20":  _ma_series("pma20"),   # actually pma20 is relative; recompute
-        }
         # Compute actual MA values
         price_df = df.dropna(subset=["close"]).tail(days + 60)
         for w in [20, 60]:
