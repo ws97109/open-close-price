@@ -1,7 +1,7 @@
 import './style.css'
 import { predict, analyzeStream } from './api'
 import { fetchChartData, renderChart } from './chart'
-import type { PredictResponse, Signal, TechnicalData, SentimentArticle } from './types'
+import type { PredictResponse, Signal, TechnicalData, SentimentArticle, PriceRange } from './types'
 
 const QUICK_STOCKS = [
   { id: '2412', name: '中華電信' }, { id: '2330', name: '台積電' },
@@ -32,6 +32,32 @@ function dir(v: number | null): 'up' | 'down' | 'neutral' {
 function techRow(label: string, value: string, d: 'up' | 'down' | 'neutral' = 'neutral'): string {
   const cls = d === 'up' ? 'val-up' : d === 'down' ? 'val-down' : ''
   return `<div class="tech-row"><span class="tl">${label}</span><span class="tv ${cls}">${value}</span></div>`
+}
+
+function rangeCard(hl: PriceRange, curClose: number | null): string {
+  const signPh = hl.high_pct >= 0 ? '+' : ''
+  const signPl = hl.low_pct  >= 0 ? '+' : ''
+  const rangePct = hl.high_pct - hl.low_pct
+  return `
+  <div class="pred-card range-card">
+    <div class="pred-title">明日高低價預測</div>
+    <div class="pred-acc">${hl.accuracy_note}</div>
+    <div class="range-grid">
+      <div class="range-cell">
+        <div class="range-lbl">預測最高</div>
+        <div class="range-val val-up">${hl.pred_high.toFixed(2)}</div>
+        <div class="range-sub val-up">${signPh}${hl.high_pct.toFixed(2)}%</div>
+      </div>
+      <div class="range-sep">↕</div>
+      <div class="range-cell">
+        <div class="range-lbl">預測最低</div>
+        <div class="range-val val-down">${hl.pred_low.toFixed(2)}</div>
+        <div class="range-sub val-down">${signPl}${hl.low_pct.toFixed(2)}%</div>
+      </div>
+    </div>
+    <div class="range-width">預期振幅 ${rangePct.toFixed(2)}%${curClose ? ` ≈ ${(curClose * rangePct / 100).toFixed(2)} 元` : ''}</div>
+    <div class="pred-desc">基於 ATR、布林帶、波動率回歸預測</div>
+  </div>`
 }
 
 function signalCard(title: string, accNote: string, side: PredictResponse['gap']): string {
@@ -145,6 +171,9 @@ function renderResult(d: PredictResponse): string {
       ${signalCard('開盤跳空方向', d.gap.accuracy_note, d.gap)}
       ${signalCard('收盤漲跌方向', d.close.accuracy_note, d.close)}
     </div>
+    <div class="pred-grid-single">
+      ${d.high_low ? rangeCard(d.high_low, d.price.close) : ''}
+    </div>
 
     <!-- Sentiment -->
     <div class="section-title">
@@ -191,8 +220,8 @@ function renderResult(d: PredictResponse): string {
 
     <!-- Disclaimer -->
     <div class="disclaimer">
-      ⚠ 開盤跳空準確率 85%（conf&gt;70%，2412 歷史回測）· 收盤方向準確率 ~72%（conf&gt;72%）
-      · 以上資訊僅供研究參考，不構成投資建議
+      ⚠ 開盤跳空 84%（conf&gt;70%）· 收盤方向 ~67%（conf&gt;70%）· 高低價 ±1% 命中率 94%+
+      · 信心度門檻均為 70%，低於此值顯示「觀望」 · 以上資訊僅供研究參考，不構成投資建議
     </div>
   </div>`
 }

@@ -62,6 +62,14 @@ export interface PriceData {
   low: number | null
 }
 
+export interface PriceRange {
+  pred_high: number
+  pred_low: number
+  high_pct: number
+  low_pct: number
+  accuracy_note: string
+}
+
 export interface PredictResponse {
   stock: string
   stock_name: string
@@ -69,6 +77,7 @@ export interface PredictResponse {
   price: PriceData
   gap: PredictionSide
   close: PredictionSide
+  high_low: PriceRange
   sentiment: Sentiment
   technical: TechnicalData
   top_features: FeatureImportance[]

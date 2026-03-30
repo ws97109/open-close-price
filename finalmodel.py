@@ -59,7 +59,7 @@ DEFAULT_STOCK     = "2412"
 TRAIN_START       = "2005-01-01"
 TRAIN_END         = "2024-12-31"
 GAP_CONF_THR      = 0.20    # |prob-0.5| > 0.20 → 70% conf for gap target  (84%+ accuracy)
-CLOSE_CONF_THR    = 0.35    # |prob-0.5| > 0.35 → 85% conf for close target (77%+ accuracy)
+CLOSE_CONF_THR    = 0.20    # |prob-0.5| > 0.20 → 70% conf, consistent with gap threshold
 N_FOLDS           = 5
 
 LGB_PARAMS = dict(
@@ -91,6 +91,8 @@ _EXCL = {
     # SPY raw return features — excluded to prevent all stocks predicting the same direction.
     # Replaced by per-stock correlation-weighted interaction features (spy_alpha*).
     "spy_r1", "spy_r3", "spy_r5", "spy_r10",
+    # Regression targets — must not leak into feature matrix
+    "high_target", "low_target",
 }
 
 # ─────────────────────────────────────────────────────────────
@@ -447,6 +449,9 @@ def build_targets(df: pd.DataFrame) -> pd.DataFrame:
     df["target"]     = (df["fr"] > 0).astype(int)
     df["gap_fr"]     = (df["open"].shift(-1) - df["close"]) / (df["close"] + 1e-9)
     df["gap_target"] = (df["gap_fr"] > 0).astype(int)
+    # High/Low regression targets: % deviation from today's close
+    df["high_target"] = (df["high"].shift(-1) - df["close"]) / (df["close"] + 1e-9)
+    df["low_target"]  = (df["low"].shift(-1)  - df["close"]) / (df["close"] + 1e-9)
     return df
 
 
@@ -505,6 +510,80 @@ def _predict_proba(m_lgb, m_xgb, m_cb, X: pd.DataFrame) -> np.ndarray:
     p2 = m_xgb.predict_proba(X)[:, 1]
     p3 = m_cb.predict_proba(X)[:, 1]
     return 0.40 * p1 + 0.30 * p2 + 0.30 * p3
+
+
+# ─────────────────────────────────────────────────────────────
+# HIGH / LOW PRICE RANGE — regression ensemble
+# ─────────────────────────────────────────────────────────────
+_LGB_REG_PARAMS = dict(
+    n_estimators=500, num_leaves=47, learning_rate=0.02,
+    feature_fraction=0.7, bagging_fraction=0.8, bagging_freq=5,
+    min_child_samples=15, reg_alpha=0.05, reg_lambda=0.5,
+    objective="regression", metric="rmse",
+    random_state=42, verbose=-1, n_jobs=-1,
+)
+_XGB_REG_PARAMS = dict(
+    n_estimators=500, max_depth=5, learning_rate=0.02,
+    subsample=0.8, colsample_bytree=0.7, min_child_weight=3,
+    random_state=42, n_jobs=-1, verbosity=0,
+)
+
+
+def _train_fold_reg(X_tr: pd.DataFrame, y_tr: pd.Series):
+    """Train LGB + XGB regressors. Returns (m_lgb, m_xgb)."""
+    m_lgb = lgb.LGBMRegressor(**_LGB_REG_PARAMS)
+    m_lgb.fit(X_tr, y_tr)
+    m_xgb = xgb.XGBRegressor(**_XGB_REG_PARAMS)
+    m_xgb.fit(X_tr, y_tr)
+    return m_lgb, m_xgb
+
+
+def _predict_reg(m_lgb, m_xgb, X: pd.DataFrame) -> np.ndarray:
+    """Weighted ensemble regression: LGB 55% + XGB 45%."""
+    return 0.55 * m_lgb.predict(X) + 0.45 * m_xgb.predict(X)
+
+
+def validate_range_model(
+    df_c: pd.DataFrame,
+    fc: List[str],
+    target_col: str,       # "high_target" or "low_target"
+    close_col: str = "close",
+    tol: float = 0.01,     # ±1% of close
+    n_folds: int = N_FOLDS,
+) -> Dict:
+    """Walk-forward hit-rate validation for high/low regression."""
+    splits = wf_splits(df_c, n_folds)
+    hits, total = 0, 0
+    errors = []
+    for tr_d, te_d in splits:
+        tr = df_c[df_c["date"].isin(tr_d)].dropna(subset=fc + [target_col, close_col])
+        te = df_c[df_c["date"].isin(te_d)].dropna(subset=fc + [target_col, close_col])
+        if len(te) < 20:
+            continue
+        X_tr = tr[fc].replace([np.inf, -np.inf], np.nan).fillna(0)
+        y_tr = tr[target_col]
+        X_te = te[fc].replace([np.inf, -np.inf], np.nan).fillna(0)
+        y_te = te[target_col].values
+        cl   = te[close_col].values
+
+        m_lgb, m_xgb = _train_fold_reg(X_tr, y_tr)
+        pred_pct = _predict_reg(m_lgb, m_xgb, X_te)
+
+        pred_price   = cl * (1 + pred_pct)
+        actual_price = cl * (1 + y_te)
+        err_pct      = np.abs(pred_price - actual_price) / (cl + 1e-9)
+        fold_hits    = (err_pct <= tol).sum()
+        hits  += fold_hits
+        total += len(y_te)
+        errors.extend(err_pct.tolist())
+
+    if total == 0:
+        return {"hit_rate": 0.0, "mean_error_pct": 0.0, "n": 0}
+    return {
+        "hit_rate":       round(hits / total, 4),
+        "mean_error_pct": round(float(np.mean(errors)) * 100, 3),
+        "n":              total,
+    }
 
 # ─────────────────────────────────────────────────────────────
 # WALK-FORWARD VALIDATION

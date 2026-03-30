@@ -134,7 +134,16 @@ a:hover { text-decoration: underline; }
 
 /* Prediction cards */
 .pred-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--border); }
+.pred-grid-single { margin-top: 1px; background: var(--border); }
 .pred-card { background: var(--card2); padding: 16px 20px; border-left: 4px solid transparent; }
+.range-card { border-left-color: var(--accent) !important; }
+.range-grid { display: flex; align-items: center; gap: 16px; margin: 12px 0 6px; }
+.range-cell { flex: 1; text-align: center; }
+.range-lbl  { font-size: 11px; color: var(--sub); margin-bottom: 4px; }
+.range-val  { font-size: 22px; font-weight: 700; }
+.range-sub  { font-size: 12px; margin-top: 2px; }
+.range-sep  { font-size: 20px; color: var(--sub); flex-shrink: 0; }
+.range-width { font-size: 12px; color: var(--sub); text-align: center; margin-top: 4px; }
 .pred-card.sig-up   { border-left-color: var(--green); }
 .pred-card.sig-down { border-left-color: var(--red); }
 .pred-card.sig-none { border-left-color: var(--gray); }
