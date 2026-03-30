@@ -192,16 +192,18 @@ def predict_stock(req: PredictRequest):
         X_all  = df_c[fc].replace([np.inf, -np.inf], np.nan).fillna(0)
 
         # For high/low regression: use recent 2.5 years only (better regime fit).
-        # High-volatility periods (COVID 2020, 2022 correction) inflate the target
-        # distribution and cause the model to over-predict range for calmer markets.
         cutoff_reg = df["date"].max() - pd.DateOffset(years=2, months=6)
         df_reg_all = df.dropna(subset=fc + ["high_target", "low_target"])
         df_reg = df_reg_all[df_reg_all["date"] >= cutoff_reg]
-        if len(df_reg) < 400:          # fallback if not enough recent data
+        if len(df_reg) < 400:
             df_reg = df_reg_all
         X_reg  = df_reg[fc].replace([np.inf, -np.inf], np.nan).fillna(0)
 
-        # fr (magnitude) regression uses full history like the direction models
+        # Day+2 classifier data
+        df_d2 = df.dropna(subset=fc + ["target_d2"])
+        X_d2  = df_d2[fc].replace([np.inf, -np.inf], np.nan).fillna(0)
+
+        # fr magnitude regression data
         df_fr = df_c.dropna(subset=["fr"])
         X_fr  = df_fr[fc].replace([np.inf, -np.inf], np.nan).fillna(0)
 
@@ -214,7 +216,8 @@ def predict_stock(req: PredictRequest):
             m_close = f_close.result()
             m_high  = f_high.result()
             m_low   = f_low.result()
-        # fr model runs after to keep thread pool at 4 (GPU memory)
+        # d2 and fr run sequentially after to avoid GPU memory contention
+        m_d2 = _train_fold(X_d2, df_d2["target_d2"])
         m_fr = _train_fold_reg(X_fr, df_fr["fr"])
 
         # ── Predict on last row ────────────────────────────────
@@ -224,6 +227,7 @@ def predict_stock(req: PredictRequest):
 
         prob_gap   = float(_predict_proba(*m_gap,   X_last)[0])
         prob_close = float(_predict_proba(*m_close, X_last)[0])
+        prob_d2    = float(_predict_proba(*m_d2,    X_last)[0])
 
         # ── High/Low price predictions ────────────────────────────
         cur_close_val = float(last_row["close"].iloc[0])
@@ -238,21 +242,20 @@ def predict_stock(req: PredictRequest):
             sub = df.dropna(subset=[col])
             return float(sub.iloc[-1][col]) if len(sub) else fallback
 
-        # Compound anchor: 50% yesterday's actual excursion (hi_oc1) + 50% EMA-5 avg
-        # hi_oc1 captures today's actual high-close ratio → strong predictor for tomorrow
-        # hi_ema5 provides a smooth baseline to avoid over-reacting to outlier days
-        hi_oc1   = _col_val("hi_oc1",  _col_val("hi_avg3", pred_high_raw))
-        lo_oc1   = _col_val("lo_oc1",  _col_val("lo_avg3", pred_low_raw))
-        hi_ema5  = _col_val("hi_ema5", _col_val("hi_avg5", pred_high_raw))
-        lo_ema5  = _col_val("lo_ema5", _col_val("lo_avg5", pred_low_raw))
-        hi_anchor = 0.50 * hi_oc1 + 0.50 * hi_ema5
-        lo_anchor = 0.50 * lo_oc1 + 0.50 * lo_ema5
+        # Compound anchor: 70% yesterday's actual excursion (hi_oc1) + 30% EMA-3
+        # hi_oc1 is the single best predictor for tomorrow's range — serial correlation
+        # in high-low excursions is high (0.6–0.8 autocorrelation).
+        # hi_ema3 adds smoothing to handle outlier days (e.g. earnings spikes).
+        hi_oc1  = _col_val("hi_oc1",  _col_val("hi_avg3", pred_high_raw))
+        lo_oc1  = _col_val("lo_oc1",  _col_val("lo_avg3", pred_low_raw))
+        hi_ema3 = _col_val("hi_ema3", _col_val("hi_avg3", pred_high_raw))
+        lo_ema3 = _col_val("lo_ema3", _col_val("lo_avg3", pred_low_raw))
+        hi_anchor = 0.70 * hi_oc1 + 0.30 * hi_ema3
+        lo_anchor = 0.70 * lo_oc1 + 0.30 * lo_ema3
 
-        # Blend: 30% ML + 70% compound anchor
-        # High anchor weight keeps predictions anchored to current-regime behavior;
-        # recent-data training (2.5yr) further narrows the ML prediction distribution.
-        pred_high_pct = 0.30 * pred_high_raw + 0.70 * hi_anchor
-        pred_low_pct  = 0.30 * pred_low_raw  + 0.70 * lo_anchor
+        # Blend: 20% ML + 80% anchor — anchor dominates to stay in current regime
+        pred_high_pct = 0.20 * pred_high_raw + 0.80 * hi_anchor
+        pred_low_pct  = 0.20 * pred_low_raw  + 0.80 * lo_anchor
 
         # Safety: high must be above close, low must be below close
         pred_high_pct = max(pred_high_pct, max(hi_anchor * 0.25, 0.001))
@@ -266,11 +269,12 @@ def predict_stock(req: PredictRequest):
         pred_high_pct = (pred_high_price - cur_close_val) / (cur_close_val + 1e-9)
         pred_low_pct  = (pred_low_price  - cur_close_val) / (cur_close_val + 1e-9)
 
-        # ── 漲跌幅 prediction (close-to-close daily return magnitude) ──
+        # ── 漲跌幅 prediction (predicted magnitude, not direction) ──
+        # Direction comes from the close classifier (better calibrated).
+        # This regression predicts the absolute % magnitude to expect.
         pred_fr_raw = float(_predict_reg(*m_fr, X_last)[0])
-        # Blend with zero: magnitude is hard to predict, anchor toward 0
         pred_fr = 0.60 * pred_fr_raw
-        pred_fr = float(np.clip(pred_fr, -0.06, 0.06))   # cap at ±6%
+        pred_fr = float(np.clip(pred_fr, -0.06, 0.06))
 
         # ── Sentiment ──────────────────────────────────────────
         sname   = STOCK_NAMES.get(sid, sid)
@@ -278,9 +282,11 @@ def predict_stock(req: PredictRequest):
         adj     = sent["adjustment"]
         prob_gap_adj   = float(np.clip(prob_gap   + adj, 0.01, 0.99))
         prob_close_adj = float(np.clip(prob_close + adj, 0.01, 0.99))
+        prob_d2_adj    = float(np.clip(prob_d2    + adj, 0.01, 0.99))
 
         conf_gap   = abs(prob_gap_adj   - 0.5)
         conf_close = abs(prob_close_adj - 0.5)
+        conf_d2    = abs(prob_d2_adj    - 0.5)
 
         def _signal(prob, thr):
             c = abs(prob - 0.5)
@@ -345,8 +351,14 @@ def predict_stock(req: PredictRequest):
             },
             "next_day_change": {
                 "pred_pct":    round(pred_fr * 100, 2),
-                "direction":   "UP" if pred_fr > 0.002 else ("DOWN" if pred_fr < -0.002 else "FLAT"),
-                "accuracy_note": "漲跌幅迴歸預測（日報酬%），參考用",
+                "accuracy_note": "收盤漲跌幅估計（方向請以上方收盤預測為主）",
+            },
+            "close_d2": {
+                "signal":      _signal(prob_d2_adj, CLOSE_CONF_THR),
+                "probability": round(prob_d2_adj, 4),
+                "confidence":  round(conf_d2 * 2, 4),
+                "raw_prob":    round(prob_d2, 4),
+                "accuracy_note": "後天收盤漲跌方向",
             },
             "sentiment":   sent,
             "technical":   technical,

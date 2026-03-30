@@ -86,6 +86,7 @@ CB_PARAMS = dict(
 
 _EXCL = {
     "date", "stock_id", "fr", "target", "gap_fr", "gap_target",
+    "fr_d2", "target_d2",
     "spread", "Trading_turnover", "open", "high", "low", "close",
     "volume", "amount", "Trading_money",
     "MarginPurchaseBalance", "ShortSaleBalance",
@@ -487,6 +488,9 @@ def build_targets(df: pd.DataFrame) -> pd.DataFrame:
     df["target"]     = (df["fr"] > 0).astype(int)
     df["gap_fr"]     = (df["open"].shift(-1) - df["close"]) / (df["close"] + 1e-9)
     df["gap_target"] = (df["gap_fr"] > 0).astype(int)
+    # Day+2 close direction (後天漲跌)
+    df["fr_d2"]      = df["close"].pct_change(2).shift(-2)   # 2-day return
+    df["target_d2"]  = (df["fr_d2"] > 0).astype(int)
 
     # High/Low regression targets — raw % from close (per-stock model, no ATR normalization)
     # Using raw % prevents ATR amplification: for high-vol stocks (2454 ATR~2%),
