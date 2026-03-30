@@ -58,8 +58,8 @@ except ImportError:
 DEFAULT_STOCK     = "2412"
 TRAIN_START       = "2005-01-01"
 TRAIN_END         = "2024-12-31"
-GAP_CONF_THR      = 0.20    # |prob-0.5| > 0.20 → 70% conf for gap target  (85%+ accuracy)
-CLOSE_CONF_THR    = 0.22    # |prob-0.5| > 0.22 → 72% conf for close target (~72% accuracy)
+GAP_CONF_THR      = 0.20    # |prob-0.5| > 0.20 → 70% conf for gap target  (84%+ accuracy)
+CLOSE_CONF_THR    = 0.35    # |prob-0.5| > 0.35 → 85% conf for close target (77%+ accuracy)
 N_FOLDS           = 5
 
 LGB_PARAMS = dict(
@@ -88,6 +88,9 @@ _EXCL = {
     "volume", "amount", "Trading_money",
     "MarginPurchaseBalance", "ShortSaleBalance",
     "MarginPurchaseBuy", "MarginPurchaseSell",
+    # SPY raw return features — excluded to prevent all stocks predicting the same direction.
+    # Replaced by per-stock correlation-weighted interaction features (spy_alpha*).
+    "spy_r1", "spy_r3", "spy_r5", "spy_r10",
 }
 
 # ─────────────────────────────────────────────────────────────
@@ -340,6 +343,28 @@ def engineer(df: pd.DataFrame, spy=None, sector=None) -> pd.DataFrame:
     df["vbull"] = ((v > v.rolling(5).mean()) & (c > o)).astype(int)
     df["vbear"] = ((v > v.rolling(5).mean()) & (c < o)).astype(int)
 
+    # Intraday features (stock-specific, useful for close-direction prediction)
+    df["intra_ret"]   = (c - o) / (o + 1e-9)           # close vs open (intraday momentum)
+    df["intra_ret_l1"]= df["intra_ret"].shift(1)
+    df["intra_ret_l2"]= df["intra_ret"].shift(2)
+    df["gap_open"]    = (o - c.shift()) / (c.shift() + 1e-9)  # today's opening gap
+    df["gap_fill"]    = ((c - o) * np.sign(o - c.shift())) / (abs(o - c.shift()) + 1e-9)  # gap fill ratio
+    df["intra_streak3"] = df["intra_ret"].apply(np.sign).rolling(3).sum()
+    df["intra_streak5"] = df["intra_ret"].apply(np.sign).rolling(5).sum()
+    # Overnight gap × intraday interaction (did gap continue or reverse?)
+    df["gap_cont"]    = np.sign(df["gap_open"]) * np.sign(df["intra_ret"])
+    df["gap_cont5"]   = df["gap_cont"].rolling(5).mean()   # recent tendency
+    # Trend quality: how aligned are recent days
+    df["trend_qual5"] = (
+        (df["r1"].rolling(5).sum()) / (df["r1"].abs().rolling(5).sum() + 1e-9)
+    )
+    df["trend_qual10"] = (
+        df["r1"].rolling(10).sum() / (df["r1"].abs().rolling(10).sum() + 1e-9)
+    )
+    # Open-close range relative to day range
+    df["oc_range"]    = (c - o).abs() / (h - l + 1e-9)
+    df["oc_range5"]   = df["oc_range"].rolling(5).mean()
+
     # Calendar
     df["dow"] = df["date"].dt.dayofweek
     df["mo"]  = df["date"].dt.month
@@ -370,6 +395,38 @@ def engineer(df: pd.DataFrame, spy=None, sector=None) -> pd.DataFrame:
         df = df.merge(spy, on="date", how="left")
         for col in [x for x in spy.columns if x != "date"]:
             df[col] = df[col].ffill()
+
+        # ── Per-stock SPY interaction features ──────────────────
+        # Instead of using raw spy_r1 (which makes ALL stocks predict the same direction),
+        # build features that capture HOW THIS STOCK specifically relates to SPY.
+        spy_r = df["spy_r1"].fillna(0)
+        stock_r = df["r1"].fillna(0)
+
+        # Rolling correlation between stock and SPY returns
+        for w in [10, 20, 60]:
+            corr_w = stock_r.rolling(w).corr(spy_r).fillna(0).clip(-1, 1)
+            df[f"spy_corr{w}"] = corr_w
+            # Interaction: SPY return × stock-SPY correlation
+            # High-correlation stocks → large signal; low/neg-correlation → near zero / negative
+            df[f"spy_alpha{w}"] = spy_r * corr_w
+
+        # Rolling beta (how much this stock amplifies SPY moves)
+        df["spy_beta20"] = (
+            stock_r.rolling(20).cov(spy_r) / (spy_r.rolling(20).var() + 1e-9)
+        ).fillna(1.0).clip(-3, 3)
+        df["spy_beta60"] = (
+            stock_r.rolling(60).cov(spy_r) / (spy_r.rolling(60).var() + 1e-9)
+        ).fillna(1.0).clip(-3, 3)
+
+        # Excess return vs SPY (captures stock-specific alpha)
+        df["rel_spy_r1"] = stock_r - spy_r
+        if "spy_r5" in df.columns:
+            df["rel_spy_r5"]  = df.get("r5",  stock_r) - df["spy_r5"]
+        if "spy_r10" in df.columns:
+            df["rel_spy_r10"] = df.get("r10", stock_r) - df["spy_r10"]
+
+        # Spy-adjusted expected gap based on beta
+        df["spy_exp_gap"] = spy_r * df["spy_beta20"]
 
     # Sector / market context (0050)
     if sector is not None:

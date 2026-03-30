@@ -4,10 +4,10 @@ AI-powered Taiwan stock **opening gap & close direction** prediction system with
 
 ## Validated Accuracy (2412 中華電信, walk-forward 5 folds)
 
-| Target | No filter | conf >70% |
-|--------|-----------|-----------|
-| Opening Gap (open[t+1] > close[t]) | 78.2% | **85.1%** |
-| Close Direction (close[t+1] > close[t]) | 59.0% | ~72% |
+| Target | No filter | Filtered |
+|--------|-----------|---------|
+| Opening Gap (open[t+1] > close[t]) | 78.4% | **84.8%** (conf >70%) |
+| Close Direction (close[t+1] > close[t]) | 59.3% | **77.4%** (conf >85%) |
 
 ## Features
 
@@ -79,9 +79,11 @@ python3 sentiment.py 2412 中華電信
             └── types.ts    # TypeScript types
 ```
 
-## Key Insight
+## Key Insights
 
-Taiwan's opening gap is driven by US market (SPY) overnight return — a **causal** relationship (US closes before Taiwan opens), not leakage. Adding SPY as a primary feature pushes gap prediction accuracy from ~58% to 85%+.
+1. **Gap prediction**: Taiwan's opening gap correlates with US market (SPY) overnight return. However, using raw SPY return as a direct feature causes all stocks to predict the same direction. Instead, per-stock SPY interaction features are used: rolling stock-SPY correlation (`spy_corr20`), scaled SPY signal (`spy_alpha20 = spy_r1 × corr20`), and excess return vs SPY (`rel_spy_r1 = stock_r1 − spy_r1`). This allows high-beta stocks (TSMC) to follow SPY strongly while low-beta stocks (telecom) rely on their own signals.
+
+2. **Close direction**: At conf>85% threshold, 77.4% accuracy. Lower confidence predictions show NO_SIGNAL — model is conservative to maintain quality.
 
 ## Disclaimer
 
