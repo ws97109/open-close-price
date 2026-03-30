@@ -135,49 +135,44 @@ export function renderChart(container: HTMLElement, data: ChartPayload): void {
   const sigGap   = pp.gap_signal
   const sigClose = pp.close_signal
 
-  // Anchor dot at last close
-  const anchorSeries = _chart.addSeries(LineSeries, {
-    color: 'transparent', lineWidth: 1,
-    lastValueVisible: false, priceLineVisible: false,
-    visible: false,
+  // Always draw prediction lines — grey when NO_SIGNAL, green/red when confident
+  const gapColor   = sigGap   === 'UP' ? '#3fb950' : sigGap   === 'DOWN' ? '#f85149' : '#4a5568'
+  const closeColor = sigClose === 'UP' ? '#a8e6cf' : sigClose === 'DOWN' ? '#ff8b8b' : '#6b7280'
+
+  const gapLabel = sigGap !== 'NO_SIGNAL'
+    ? `開盤預測 ${sigGap === 'UP' ? '↑' : '↓'} ${(pp.prob_gap * 100).toFixed(0)}%`
+    : `開盤 ${(pp.prob_gap * 100).toFixed(0)}%（觀望）`
+  const closeLabel = sigClose !== 'NO_SIGNAL'
+    ? `收盤預測 ${sigClose === 'UP' ? '↑' : '↓'} ${(pp.prob_close * 100).toFixed(0)}%`
+    : `收盤 ${(pp.prob_close * 100).toFixed(0)}%（觀望）`
+
+  const gapLine = _chart.addSeries(LineSeries, {
+    color:           gapColor,
+    lineWidth:       sigGap !== 'NO_SIGNAL' ? 2 : 1,
+    lineStyle:       LineStyle.Dashed,
+    title:           gapLabel,
+    lastValueVisible: true,
+    priceLineVisible: false,
+    crosshairMarkerRadius: 5,
   })
-  anchorSeries.setData([{ time: pp.last_time as any, value: pp.last_close }])
+  gapLine.setData([
+    { time: pp.last_time as any, value: pp.last_close },
+    { time: pp.next_time as any, value: pp.gap_target_price },
+  ])
 
-  // Gap prediction line (dashed)
-  if (sigGap !== 'NO_SIGNAL') {
-    const gapColor = sigGap === 'UP' ? '#3fb950' : '#f85149'
-    const gapLine = _chart.addSeries(LineSeries, {
-      color:           gapColor,
-      lineWidth:       2,
-      lineStyle:       LineStyle.Dashed,
-      title:           `開盤預測 ${sigGap === 'UP' ? '↑' : '↓'} ${(pp.prob_gap * 100).toFixed(0)}%`,
-      lastValueVisible: true,
-      priceLineVisible: false,
-      crosshairMarkerRadius: 5,
-    })
-    gapLine.setData([
-      { time: pp.last_time as any, value: pp.last_close },
-      { time: pp.next_time as any, value: pp.gap_target_price },
-    ])
-  }
-
-  // Close prediction line (dotted)
-  if (sigClose !== 'NO_SIGNAL') {
-    const closeColor = sigClose === 'UP' ? '#a8e6cf' : '#ff8b8b'
-    const closeLine = _chart.addSeries(LineSeries, {
-      color:           closeColor,
-      lineWidth:       2,
-      lineStyle:       LineStyle.Dotted,
-      title:           `收盤預測 ${sigClose === 'UP' ? '↑' : '↓'} ${(pp.prob_close * 100).toFixed(0)}%`,
-      lastValueVisible: true,
-      priceLineVisible: false,
-      crosshairMarkerRadius: 5,
-    })
-    closeLine.setData([
-      { time: pp.last_time as any, value: pp.last_close },
-      { time: pp.next_time as any, value: pp.close_target_price },
-    ])
-  }
+  const closeLine = _chart.addSeries(LineSeries, {
+    color:           closeColor,
+    lineWidth:       sigClose !== 'NO_SIGNAL' ? 2 : 1,
+    lineStyle:       LineStyle.Dotted,
+    title:           closeLabel,
+    lastValueVisible: true,
+    priceLineVisible: false,
+    crosshairMarkerRadius: 5,
+  })
+  closeLine.setData([
+    { time: pp.last_time as any, value: pp.last_close },
+    { time: pp.next_time as any, value: pp.close_target_price },
+  ])
 
   // ── Probability sub-chart ────────────────────────────────────
   const probEl = document.createElement('div')
@@ -266,8 +261,8 @@ export function renderChart(container: HTMLElement, data: ChartPayload): void {
     <span class="leg-item" style="color:#58a6ff">■ MA20</span>
     <span class="leg-item" style="color:#d29922">■ MA60</span>
     <span class="leg-item" style="color:#bc8cff">■ MA120</span>
-    ${sigGap !== 'NO_SIGNAL' ? `<span class="leg-item" style="color:${sigGap === 'UP' ? '#3fb950' : '#f85149'}">--- 開盤預測${sigGap === 'UP' ? '↑' : '↓'}</span>` : ''}
-    ${sigClose !== 'NO_SIGNAL' ? `<span class="leg-item" style="color:${sigClose === 'UP' ? '#a8e6cf' : '#ff8b8b'}">··· 收盤預測${sigClose === 'UP' ? '↑' : '↓'}</span>` : ''}
+    <span class="leg-item" style="color:${gapColor}">--- 開盤${sigGap === 'UP' ? '↑' : sigGap === 'DOWN' ? '↓' : '？'}</span>
+    <span class="leg-item" style="color:${closeColor}">··· 收盤${sigClose === 'UP' ? '↑' : sigClose === 'DOWN' ? '↓' : '？'}</span>
   `
   mainEl.appendChild(legend)
 

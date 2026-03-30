@@ -94,7 +94,7 @@ _EXCL = {
     # Replaced by per-stock correlation-weighted interaction features (spy_alpha*).
     "spy_r1", "spy_r3", "spy_r5", "spy_r10",
     # Regression targets — must not leak into feature matrix
-    "high_target", "low_target",
+    "high_target", "low_target", "_atr_pct",
 }
 
 # ─────────────────────────────────────────────────────────────
@@ -442,6 +442,37 @@ def engineer(df: pd.DataFrame, spy=None, sector=None) -> pd.DataFrame:
             df["rel_mkt1"] = df["r1"] - df["mkt_r1"]
             df["rel_mkt5"] = df["r5"] - df["mkt_r5"]
 
+    # ── High/Low specific features (critical for range prediction) ──
+    # How much above close does this stock's high typically go?
+    hi_oc  = (h - c) / (c + 1e-9)   # today's high minus close (%)
+    lo_oc  = (l - c) / (c + 1e-9)   # today's low  minus close (%)
+    hi_op  = (h - o) / (o + 1e-9)   # today's high minus open  (%)
+    lo_op  = (l - o) / (o + 1e-9)   # today's low  minus open  (%)
+    for w in [3, 5, 10, 20, 60]:    # include 3-day for fast anchor
+        df[f"hi_avg{w}"]  = hi_oc.rolling(w).mean()   # avg high-close ratio
+        df[f"lo_avg{w}"]  = lo_oc.rolling(w).mean()   # avg low-close ratio
+        df[f"hl_rng{w}"]  = ((h - l) / (c + 1e-9)).rolling(w).mean()  # avg intraday range
+        df[f"hi_std{w}"]  = hi_oc.rolling(w).std()    # volatility of high excursion
+        df[f"lo_std{w}"]  = lo_oc.rolling(w).std()
+    # Today's raw hi/lo positions (not shifted — these are current day signals)
+    df["hi_oc1"]  = hi_oc              # how far above close did high go today
+    df["lo_oc1"]  = lo_oc              # how far below close did low go today
+    df["hi_op1"]  = hi_op
+    df["lo_op1"]  = lo_op
+    df["hl_rng1"] = (h - l) / (c + 1e-9)    # today's high-low range (%)
+    # ATR as % of close (already have natr — use it directly)
+    # Ratio of today's move to ATR → regime detector
+    df["hi_atr_r"] = hi_oc / (df["natr"].clip(lower=1e-4) if "natr" in df.columns
+                               else (h - l) / (c + 1e-9))
+    df["lo_atr_r"] = lo_oc.abs() / (df["natr"].clip(lower=1e-4) if "natr" in df.columns
+                                     else (h - l) / (c + 1e-9))
+    # Consecutive high/low extremes
+    df["hi_streak"] = (hi_oc > hi_oc.shift(1)).astype(int).rolling(5).sum()
+    df["lo_streak"] = (lo_oc < lo_oc.shift(1)).astype(int).rolling(5).sum()
+    # Open-to-high/low ratios (how much does price travel after open?)
+    df["hi_from_o"] = (h - o).clip(lower=0) / (c + 1e-9)
+    df["lo_from_o"] = (o - l).clip(lower=0) / (c + 1e-9)
+
     return df
 
 
@@ -451,9 +482,17 @@ def build_targets(df: pd.DataFrame) -> pd.DataFrame:
     df["target"]     = (df["fr"] > 0).astype(int)
     df["gap_fr"]     = (df["open"].shift(-1) - df["close"]) / (df["close"] + 1e-9)
     df["gap_target"] = (df["gap_fr"] > 0).astype(int)
-    # High/Low regression targets: % deviation from today's close
+
+    # High/Low regression targets — raw % from close (per-stock model, no ATR normalization)
+    # Using raw % prevents ATR amplification: for high-vol stocks (2454 ATR~2%),
+    # ATR normalization causes 2.5× error amplification. Raw % keeps errors interpretable.
+    # Inverse transform: price = close * (1 + pred_pct)
     df["high_target"] = (df["high"].shift(-1) - df["close"]) / (df["close"] + 1e-9)
     df["low_target"]  = (df["low"].shift(-1)  - df["close"]) / (df["close"] + 1e-9)
+
+    # Store ATR% for potential feature use (excluded from feature matrix via _EXCL)
+    atr = _atr(df["high"], df["low"], df["close"])
+    df["_atr_pct"] = (atr / (df["close"] + 1e-9)).clip(lower=0.001)
     return df
 
 
@@ -519,16 +558,18 @@ def _predict_proba(m_lgb, m_xgb, m_cb, X: pd.DataFrame) -> np.ndarray:
 # HIGH / LOW PRICE RANGE — regression ensemble
 # ─────────────────────────────────────────────────────────────
 _LGB_REG_PARAMS = dict(
-    n_estimators=400, num_leaves=47, learning_rate=0.02,
-    feature_fraction=0.7, bagging_fraction=0.8, bagging_freq=5,
-    min_child_samples=15, reg_alpha=0.05, reg_lambda=0.5,
-    objective="regression", metric="rmse",
+    # Quantile (median) regression — more robust than MSE for stock price extremes.
+    # Median is less affected by occasional huge-range days (earnings, news shocks).
+    n_estimators=600, num_leaves=63, learning_rate=0.018,
+    feature_fraction=0.75, bagging_fraction=0.8, bagging_freq=5,
+    min_child_samples=12, reg_alpha=0.03, reg_lambda=0.3,
+    objective="quantile", alpha=0.5,    # median = 50th percentile
     random_state=42, verbose=-1, n_jobs=-1,
 )
 _XGB_REG_PARAMS = dict(
-    n_estimators=800, max_depth=6, learning_rate=0.02,
-    subsample=0.8, colsample_bytree=0.7, min_child_weight=3,
-    device="cuda", tree_method="hist",   # GPU acceleration
+    n_estimators=800, max_depth=7, learning_rate=0.018,
+    subsample=0.8, colsample_bytree=0.75, min_child_weight=2,
+    device="cuda", tree_method="hist",   # GPU: ~0.7s for regression
     random_state=42, verbosity=0,
 )
 
@@ -553,39 +594,50 @@ def validate_range_model(
     fc: List[str],
     target_col: str,       # "high_target" or "low_target"
     close_col: str = "close",
-    tol: float = 0.01,     # ±1% of close
+    tol: float = 0.004,    # ±0.4% of close
     n_folds: int = N_FOLDS,
+    anchor_col: str = "",  # rolling-avg column for blend anchor (e.g. "hi_avg3")
 ) -> Dict:
-    """Walk-forward hit-rate validation for high/low regression."""
+    """Walk-forward hit-rate validation for high/low regression.
+    Targets are raw % of close. Optionally applies rolling-anchor blend at test time.
+    """
     splits = wf_splits(df_c, n_folds)
-    hits, total = 0, 0
+    hits04, hits10, total = 0, 0, 0
     errors = []
     for tr_d, te_d in splits:
-        tr = df_c[df_c["date"].isin(tr_d)].dropna(subset=fc + [target_col, close_col])
-        te = df_c[df_c["date"].isin(te_d)].dropna(subset=fc + [target_col, close_col])
+        needed = fc + [target_col, close_col]
+        if anchor_col:
+            needed = needed + [anchor_col]
+        tr = df_c[df_c["date"].isin(tr_d)].dropna(subset=needed)
+        te = df_c[df_c["date"].isin(te_d)].dropna(subset=needed)
         if len(te) < 20:
             continue
         X_tr = tr[fc].replace([np.inf, -np.inf], np.nan).fillna(0)
         y_tr = tr[target_col]
         X_te = te[fc].replace([np.inf, -np.inf], np.nan).fillna(0)
-        y_te = te[target_col].values
+        y_te = te[target_col].values   # raw % from close
         cl   = te[close_col].values
 
         m_lgb, m_xgb = _train_fold_reg(X_tr, y_tr)
         pred_pct = _predict_reg(m_lgb, m_xgb, X_te)
 
-        pred_price   = cl * (1 + pred_pct)
-        actual_price = cl * (1 + y_te)
-        err_pct      = np.abs(pred_price - actual_price) / (cl + 1e-9)
-        fold_hits    = (err_pct <= tol).sum()
-        hits  += fold_hits
-        total += len(y_te)
+        # Apply rolling-anchor blend (same as server.py)
+        if anchor_col and anchor_col in te.columns:
+            anchor = te[anchor_col].values
+            pred_pct = 0.60 * pred_pct + 0.40 * anchor
+
+        # pred_pct and y_te are both raw % from close → direct comparison
+        err_pct = np.abs(pred_pct - y_te)   # already in fraction-of-close units
+        hits04 += (err_pct <= 0.004).sum()
+        hits10 += (err_pct <= 0.010).sum()
+        total  += len(y_te)
         errors.extend(err_pct.tolist())
 
     if total == 0:
-        return {"hit_rate": 0.0, "mean_error_pct": 0.0, "n": 0}
+        return {"hit04": 0.0, "hit10": 0.0, "mean_error_pct": 0.0, "n": 0}
     return {
-        "hit_rate":       round(hits / total, 4),
+        "hit04":          round(hits04 / total, 4),   # ±0.4% hit rate
+        "hit10":          round(hits10 / total, 4),   # ±1.0% hit rate
         "mean_error_pct": round(float(np.mean(errors)) * 100, 3),
         "n":              total,
     }

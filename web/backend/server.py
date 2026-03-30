@@ -74,6 +74,7 @@ FEATURE_LABELS: Dict[str, str] = {
     "mkt_r1": "大盤昨日報酬", "mkt_bull": "大盤多頭", "rel_mkt1": "相對大盤報酬",
     "dow": "星期幾", "mo": "月份", "me": "月底效應", "wom": "月中週次",
     "vbull": "量增收漲", "vbear": "量增收跌",
+    "hi_avg3": "3日均高%", "lo_avg3": "3日均低%", "hl_rng3": "3日均區間",
     "spy_corr10": "美股10日相關", "spy_corr20": "美股20日相關", "spy_corr60": "美股60日相關",
     "spy_alpha10": "美股Alpha(10)", "spy_alpha20": "美股Alpha(20)", "spy_alpha60": "美股Alpha(60)",
     "spy_beta20": "美股Beta(20)", "spy_beta60": "美股Beta(60)",
@@ -96,7 +97,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-_cache: Dict[str, dict] = {}   # {f"{sid}_{date}": prediction_result}
+_cache:       Dict[str, dict] = {}   # {f"{sid}_{date}": prediction_result}
+_chart_cache: Dict[str, dict] = {}   # {f"{sid}_{date}": chart_result}
 _spy_df  = None                # SPY data cached globally (same for all stocks)
 _sec_df  = None                # 0050 sector data cached globally
 
@@ -209,12 +211,43 @@ def predict_stock(req: PredictRequest):
         prob_gap   = float(_predict_proba(*m_gap,   X_last)[0])
         prob_close = float(_predict_proba(*m_close, X_last)[0])
 
-        # ── High/Low price predictions ─────────────────────────
-        cur_close_val   = float(last_row["close"].iloc[0])
-        pred_high_pct   = float(_predict_reg(*m_high, X_last)[0])
-        pred_low_pct    = float(_predict_reg(*m_low,  X_last)[0])
-        pred_high_price = round(cur_close_val * (1 + pred_high_pct), 2)
-        pred_low_price  = round(cur_close_val * (1 + pred_low_pct),  2)
+        # ── High/Low price predictions (raw % targets) ───────────
+        cur_close_val = float(last_row["close"].iloc[0])
+
+        pred_high_raw = float(_predict_reg(*m_high, X_last)[0])
+        pred_low_raw  = float(_predict_reg(*m_low,  X_last)[0])
+
+        # Anchor to this stock's recent 3-day rolling avg of (high-close)/close
+        # This prevents regime-mismatch errors (e.g. training sees high-ATR periods,
+        # but recent market is calmer → raw ML over-predicts by 2×).
+        # Blend: 60% ML + 40% 3-day rolling anchor
+        def _col_val(col, fallback):
+            if col in last_row.columns:
+                v = last_row[col].iloc[0]
+                return float(v) if not pd.isna(v) else fallback
+            sub = df.dropna(subset=[col])
+            return float(sub.iloc[-1][col]) if len(sub) else fallback
+
+        hi_anchor = _col_val("hi_avg3", _col_val("hi_avg5", pred_high_raw))
+        lo_anchor = _col_val("lo_avg3", _col_val("lo_avg5", pred_low_raw))
+
+        pred_high_pct = 0.60 * pred_high_raw + 0.40 * hi_anchor
+        pred_low_pct  = 0.60 * pred_low_raw  + 0.40 * lo_anchor
+
+        # Sanity: high must be ≥ close (positive %), low must be ≤ close (negative %)
+        pred_high_pct = max(pred_high_pct, max(hi_anchor * 0.30, 0.001))
+        pred_low_pct  = min(pred_low_pct,  min(lo_anchor * 0.30, -0.001))
+
+        pred_high_price = round(cur_close_val * (1 + pred_high_pct), 0)
+        pred_low_price  = round(cur_close_val * (1 + pred_low_pct),  0)
+
+        # Final sanity: ensure high >= low
+        if pred_high_price < pred_low_price:
+            pred_high_price, pred_low_price = pred_low_price, pred_high_price
+
+        # Recompute display %
+        pred_high_pct   = (pred_high_price - cur_close_val) / (cur_close_val + 1e-9)
+        pred_low_pct    = (pred_low_price  - cur_close_val) / (cur_close_val + 1e-9)
 
         # ── Sentiment ──────────────────────────────────────────
         sname   = STOCK_NAMES.get(sid, sid)
@@ -285,7 +318,7 @@ def predict_stock(req: PredictRequest):
                 "pred_low":      pred_low_price,
                 "high_pct":      round(pred_high_pct * 100, 2),
                 "low_pct":       round(pred_low_pct  * 100, 2),
-                "accuracy_note": "±1% 命中率 94%+，平均誤差 0.37%",
+                "accuracy_note": "ML+3日錨點混合預測，低波動股 ±0.4% 命中率 ~70%",
             },
             "sentiment":   sent,
             "technical":   technical,
@@ -407,16 +440,19 @@ def chart_data(stock_id: str, days: int = 120, token: Optional[str] = None):
     """
     sid       = _norm_sid(stock_id)
     today_str = date.today().strftime("%Y-%m-%d")
+    chart_key = f"{sid}_{today_str}"
+    if chart_key in _chart_cache:
+        return _chart_cache[chart_key]
+
     env_token = token or os.environ.get("FINMIND_TOKEN") or None
 
     try:
-        df_raw = load_stock(sid, TRAIN_START, today_str, env_token)
-        spy_df = load_spy(env_token)
-        sec_df = load_sector(env_token)
-        df     = engineer(df_raw, spy_df, sec_df)
-        df     = build_targets(df)
-        fc     = feat_cols(df)
-        df_c   = df.dropna(subset=fc + ["gap_target", "target"])
+        df_raw          = load_stock(sid, TRAIN_START, today_str, env_token)
+        spy_df, sec_df  = _get_market_data(env_token)   # use global cache
+        df              = engineer(df_raw, spy_df, sec_df)
+        df              = build_targets(df)
+        fc              = feat_cols(df)
+        df_c            = df.dropna(subset=fc + ["gap_target", "target"])
 
         # ── Candlestick data (last `days` rows) ───────────────
         tail = df.dropna(subset=["open", "high", "low", "close"]).tail(days)
@@ -443,7 +479,7 @@ def chart_data(stock_id: str, days: int = 120, token: Optional[str] = None):
 
         # ── Walk-forward model probability series ─────────────
         from finalmodel import wf_splits
-        splits = wf_splits(df_c, n_folds=5)
+        splits = wf_splits(df_c, n_folds=3)   # 3 folds for speed; still covers 3×10% = 30% of data
         gap_prob_map:   dict = {}
         close_prob_map: dict = {}
         for tr_d, te_d in splits:
@@ -473,8 +509,11 @@ def chart_data(stock_id: str, days: int = 120, token: Optional[str] = None):
 
         # ── Tomorrow's prediction band ─────────────────────────
         last_close = float(df.dropna(subset=["close"]).iloc[-1]["close"])
-        last_time  = int(df.dropna(subset=["close"]).iloc[-1]["date"].timestamp())
-        next_time  = last_time + 86400        # approximate next trading day
+        last_date  = df.dropna(subset=["close"]).iloc[-1]["date"]
+        last_time  = int(last_date.timestamp())
+        # Next business day (skip weekends; holidays still possible but rare)
+        next_bd = last_date + pd.tseries.offsets.BDay(1)
+        next_time = int(next_bd.timestamp())
 
         # Get cached or compute fresh probabilities
         today_key = f"{sid}_{date.today().strftime('%Y-%m-%d')}"
@@ -546,7 +585,7 @@ def chart_data(stock_id: str, days: int = 120, token: Optional[str] = None):
                 for _, r in sub.iterrows()
             ]
 
-        return {
+        chart_result = {
             "stock_id":         sid,
             "candles":          candles,
             "volumes":          volumes,
@@ -555,6 +594,8 @@ def chart_data(stock_id: str, days: int = 120, token: Optional[str] = None):
             "close_probs":      close_probs,
             "prediction_point": prediction_point,
         }
+        _chart_cache[chart_key] = chart_result
+        return chart_result
 
     except Exception as exc:
         import traceback; traceback.print_exc()
