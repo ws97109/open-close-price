@@ -63,21 +63,23 @@ CLOSE_CONF_THR    = 0.20    # |prob-0.5| > 0.20 → 70% conf, consistent with ga
 N_FOLDS           = 5
 
 LGB_PARAMS = dict(
-    n_estimators=900, num_leaves=63, learning_rate=0.015,
-    feature_fraction=0.7, bagging_fraction=0.8, bagging_freq=5,
-    min_child_samples=15, reg_alpha=0.1, reg_lambda=1.0,
+    n_estimators=500, num_leaves=63, learning_rate=0.02,
+    feature_fraction=0.75, bagging_fraction=0.8, bagging_freq=5,
+    min_child_samples=12, reg_alpha=0.05, reg_lambda=0.5,
     is_unbalance=True, objective="binary", metric="auc",
     random_state=42, verbose=-1, n_jobs=-1,
+    # CPU is faster than GPU for LGB at this dataset size
 )
 XGB_PARAMS = dict(
-    n_estimators=900, max_depth=5, learning_rate=0.015,
-    subsample=0.8, colsample_bytree=0.7, min_child_weight=3,
-    eval_metric="auc", use_label_encoder=False,
-    random_state=42, n_jobs=-1,
+    n_estimators=1000, max_depth=7, learning_rate=0.015,
+    subsample=0.8, colsample_bytree=0.7, min_child_weight=2,
+    eval_metric="auc",
+    device="cuda", tree_method="hist",   # GPU: ~9s vs ~60s CPU
+    random_state=42,
 )
 CB_PARAMS = dict(
-    iterations=900, depth=6, learning_rate=0.015,
-    l2_leaf_reg=3, subsample=0.8, colsample_bylevel=0.7,
+    iterations=1500, depth=7, learning_rate=0.01,
+    l2_leaf_reg=2, subsample=0.8, colsample_bylevel=0.7,
     eval_metric="AUC", random_seed=42,
     verbose=0, thread_count=-1,
 )
@@ -506,8 +508,9 @@ def _train_fold(X_tr: pd.DataFrame, y_tr: pd.Series):
 
 def _predict_proba(m_lgb, m_xgb, m_cb, X: pd.DataFrame) -> np.ndarray:
     """Weighted ensemble probability: LGB 40% + XGB 30% + CB 30%."""
+    Xv = X.values  # numpy array avoids XGB GPU/CPU device mismatch warning
     p1 = m_lgb.predict_proba(X)[:, 1]
-    p2 = m_xgb.predict_proba(X)[:, 1]
+    p2 = m_xgb.predict_proba(Xv)[:, 1]
     p3 = m_cb.predict_proba(X)[:, 1]
     return 0.40 * p1 + 0.30 * p2 + 0.30 * p3
 
@@ -516,16 +519,17 @@ def _predict_proba(m_lgb, m_xgb, m_cb, X: pd.DataFrame) -> np.ndarray:
 # HIGH / LOW PRICE RANGE — regression ensemble
 # ─────────────────────────────────────────────────────────────
 _LGB_REG_PARAMS = dict(
-    n_estimators=500, num_leaves=47, learning_rate=0.02,
+    n_estimators=400, num_leaves=47, learning_rate=0.02,
     feature_fraction=0.7, bagging_fraction=0.8, bagging_freq=5,
     min_child_samples=15, reg_alpha=0.05, reg_lambda=0.5,
     objective="regression", metric="rmse",
     random_state=42, verbose=-1, n_jobs=-1,
 )
 _XGB_REG_PARAMS = dict(
-    n_estimators=500, max_depth=5, learning_rate=0.02,
+    n_estimators=800, max_depth=6, learning_rate=0.02,
     subsample=0.8, colsample_bytree=0.7, min_child_weight=3,
-    random_state=42, n_jobs=-1, verbosity=0,
+    device="cuda", tree_method="hist",   # GPU acceleration
+    random_state=42, verbosity=0,
 )
 
 
@@ -540,7 +544,8 @@ def _train_fold_reg(X_tr: pd.DataFrame, y_tr: pd.Series):
 
 def _predict_reg(m_lgb, m_xgb, X: pd.DataFrame) -> np.ndarray:
     """Weighted ensemble regression: LGB 55% + XGB 45%."""
-    return 0.55 * m_lgb.predict(X) + 0.45 * m_xgb.predict(X)
+    Xv = X.values
+    return 0.55 * m_lgb.predict(X) + 0.45 * m_xgb.predict(Xv)
 
 
 def validate_range_model(

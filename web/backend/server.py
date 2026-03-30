@@ -8,6 +8,7 @@ Provides:
   GET  /api/health          → health check
 """
 import os, sys, asyncio, logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 from typing import Optional, List, Dict
 import numpy as np
@@ -96,6 +97,18 @@ app.add_middleware(
 )
 
 _cache: Dict[str, dict] = {}   # {f"{sid}_{date}": prediction_result}
+_spy_df  = None                # SPY data cached globally (same for all stocks)
+_sec_df  = None                # 0050 sector data cached globally
+
+
+def _get_market_data(token=None):
+    """Load SPY and 0050 once per server process; reuse on subsequent requests."""
+    global _spy_df, _sec_df
+    if _spy_df is None:
+        _spy_df = load_spy(token)
+    if _sec_df is None:
+        _sec_df = load_sector(token)
+    return _spy_df, _sec_df
 
 
 class PredictRequest(BaseModel):
@@ -126,6 +139,19 @@ def _safe(row: pd.Series, col: str) -> Optional[float]:
 
 
 # ─── Endpoints ────────────────────────────────────────────────
+@app.on_event("startup")
+async def _warmup():
+    """Pre-load SPY + 0050 in background so first predict request is faster."""
+    import threading
+    def _load():
+        try:
+            _get_market_data()
+            logger.info("Market data (SPY + 0050) pre-loaded.")
+        except Exception as e:
+            logger.warning(f"Warmup failed: {e}")
+    threading.Thread(target=_load, daemon=True).start()
+
+
 @app.get("/api/stocks")
 def list_stocks():
     return [{"id": k, "name": v} for k, v in STOCK_NAMES.items()]
@@ -151,26 +177,29 @@ def predict_stock(req: PredictRequest):
 
     try:
         # ── Load and engineer ──────────────────────────────────
-        df_raw  = load_stock(sid, TRAIN_START, today_str, token)
-        spy_df  = load_spy(token)
-        sec_df  = load_sector(token)
-        df      = engineer(df_raw, spy_df, sec_df)
+        df_raw          = load_stock(sid, TRAIN_START, today_str, token)
+        spy_df, sec_df  = _get_market_data(token)   # cached; loaded only once
+        df              = engineer(df_raw, spy_df, sec_df)
         df      = build_targets(df)
         fc      = feat_cols(df)
         df_c    = df.dropna(subset=fc + ["gap_target", "target"])
         if len(df_c) < 200:
             raise ValueError(f"資料不足（{len(df_c)} 筆）")
 
-        # ── Train classification models ────────────────────────
-        X_all   = df_c[fc].replace([np.inf, -np.inf], np.nan).fillna(0)
-        m_gap   = _train_fold(X_all, df_c["gap_target"])
-        m_close = _train_fold(X_all, df_c["target"])
-
-        # ── Train high/low regression models ──────────────────
+        # ── Train all models in parallel ───────────────────────
+        X_all  = df_c[fc].replace([np.inf, -np.inf], np.nan).fillna(0)
         df_reg = df.dropna(subset=fc + ["high_target", "low_target"])
         X_reg  = df_reg[fc].replace([np.inf, -np.inf], np.nan).fillna(0)
-        m_high = _train_fold_reg(X_reg, df_reg["high_target"])
-        m_low  = _train_fold_reg(X_reg, df_reg["low_target"])
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            f_gap   = pool.submit(_train_fold,     X_all, df_c["gap_target"])
+            f_close = pool.submit(_train_fold,     X_all, df_c["target"])
+            f_high  = pool.submit(_train_fold_reg, X_reg, df_reg["high_target"])
+            f_low   = pool.submit(_train_fold_reg, X_reg, df_reg["low_target"])
+            m_gap   = f_gap.result()
+            m_close = f_close.result()
+            m_high  = f_high.result()
+            m_low   = f_low.result()
 
         # ── Predict on last row ────────────────────────────────
         last_row = df.dropna(subset=fc).iloc[[-1]]

@@ -233,7 +233,7 @@ function showLoading(sid: string): void {
     <div class="loading-card">
       <div class="spinner"></div>
       <p>正在分析 <strong>${sid}</strong>…</p>
-      <p class="loading-sub">下載 20 年資料、訓練三模型、計算 BERT 情緒，約需 20–40 秒</p>
+      <p class="loading-sub">下載 20 年資料、訓練 GPU 加速模型、計算 BERT 情緒，首次約需 60–90 秒，同一股票當日第二次即時返回</p>
     </div>`
   sec.classList.remove('hidden')
 }
