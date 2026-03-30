@@ -70,6 +70,12 @@ export interface PriceRange {
   accuracy_note: string
 }
 
+export interface NextDayChange {
+  pred_pct: number
+  direction: 'UP' | 'DOWN' | 'FLAT'
+  accuracy_note: string
+}
+
 export interface PredictResponse {
   stock: string
   stock_name: string
@@ -78,6 +84,7 @@ export interface PredictResponse {
   gap: PredictionSide
   close: PredictionSide
   high_low: PriceRange
+  next_day_change: NextDayChange
   sentiment: Sentiment
   technical: TechnicalData
   top_features: FeatureImportance[]

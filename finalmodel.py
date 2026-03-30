@@ -454,6 +454,11 @@ def engineer(df: pd.DataFrame, spy=None, sector=None) -> pd.DataFrame:
         df[f"hl_rng{w}"]  = ((h - l) / (c + 1e-9)).rolling(w).mean()  # avg intraday range
         df[f"hi_std{w}"]  = hi_oc.rolling(w).std()    # volatility of high excursion
         df[f"lo_std{w}"]  = lo_oc.rolling(w).std()
+    # EMA-based anchors (more weight on recent days than simple rolling avg)
+    df["hi_ema3"] = hi_oc.ewm(span=3, adjust=False).mean()   # fast EMA (recent days dominate)
+    df["lo_ema3"] = lo_oc.ewm(span=3, adjust=False).mean()
+    df["hi_ema5"] = hi_oc.ewm(span=5, adjust=False).mean()
+    df["lo_ema5"] = lo_oc.ewm(span=5, adjust=False).mean()
     # Today's raw hi/lo positions (not shifted — these are current day signals)
     df["hi_oc1"]  = hi_oc              # how far above close did high go today
     df["lo_oc1"]  = lo_oc              # how far below close did low go today

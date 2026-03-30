@@ -1,7 +1,7 @@
 import './style.css'
 import { predict, analyzeStream } from './api'
 import { fetchChartData, renderChart } from './chart'
-import type { PredictResponse, Signal, TechnicalData, SentimentArticle, PriceRange } from './types'
+import type { PredictResponse, Signal, TechnicalData, SentimentArticle, PriceRange, NextDayChange } from './types'
 
 const QUICK_STOCKS = [
   { id: '2412', name: '中華電信' }, { id: '2330', name: '台積電' },
@@ -57,6 +57,35 @@ function rangeCard(hl: PriceRange, curClose: number | null): string {
     </div>
     <div class="range-width">預期振幅 ${rangePct.toFixed(2)}%${curClose ? ` ≈ ${(curClose * rangePct / 100).toFixed(2)} 元` : ''}</div>
     <div class="pred-desc">基於 ATR、布林帶、波動率回歸預測</div>
+  </div>`
+}
+
+function changeCard(ch: NextDayChange): string {
+  const isUp   = ch.direction === 'UP'
+  const isDown = ch.direction === 'DOWN'
+  const cls    = isUp ? 'sig-up' : isDown ? 'sig-down' : 'sig-none'
+  const arrow  = isUp ? '↑' : isDown ? '↓' : '→'
+  const label  = isUp ? '看漲' : isDown ? '看跌' : '持平'
+  const pct    = ch.pred_pct >= 0 ? `+${ch.pred_pct.toFixed(2)}%` : `${ch.pred_pct.toFixed(2)}%`
+  const barPct = Math.min(Math.abs(ch.pred_pct) / 3 * 100, 100)
+  return `
+  <div class="pred-card ${cls}">
+    <div class="pred-title">明日漲跌幅預測</div>
+    <div class="pred-acc">${ch.accuracy_note}</div>
+    <div class="pred-sig">
+      <span class="pred-arrow">${arrow}</span>
+      <span class="pred-label">${label}</span>
+    </div>
+    <div class="pred-bars">
+      <div class="pbar-row">
+        <span class="pbar-lbl">預測幅</span>
+        <div class="pbar-track">
+          <div class="pbar-fill" style="width:${barPct}%;background:${isUp?'var(--green)':isDown?'var(--red)':'var(--gray)'}"></div>
+        </div>
+        <span class="pbar-val ${isUp?'val-up':isDown?'val-down':''}">${pct}</span>
+      </div>
+    </div>
+    <div class="pred-desc">迴歸模型預測明日收盤漲跌幅，僅供參考</div>
   </div>`
 }
 
@@ -171,7 +200,8 @@ function renderResult(d: PredictResponse): string {
       ${signalCard('開盤跳空方向', d.gap.accuracy_note, d.gap)}
       ${signalCard('收盤漲跌方向', d.close.accuracy_note, d.close)}
     </div>
-    <div class="pred-grid-single">
+    <div class="pred-grid">
+      ${d.next_day_change ? changeCard(d.next_day_change) : ''}
       ${d.high_low ? rangeCard(d.high_low, d.price.close) : ''}
     </div>
 

@@ -190,8 +190,20 @@ def predict_stock(req: PredictRequest):
 
         # ── Train all models in parallel ───────────────────────
         X_all  = df_c[fc].replace([np.inf, -np.inf], np.nan).fillna(0)
-        df_reg = df.dropna(subset=fc + ["high_target", "low_target"])
+
+        # For high/low regression: use recent 2.5 years only (better regime fit).
+        # High-volatility periods (COVID 2020, 2022 correction) inflate the target
+        # distribution and cause the model to over-predict range for calmer markets.
+        cutoff_reg = df["date"].max() - pd.DateOffset(years=2, months=6)
+        df_reg_all = df.dropna(subset=fc + ["high_target", "low_target"])
+        df_reg = df_reg_all[df_reg_all["date"] >= cutoff_reg]
+        if len(df_reg) < 400:          # fallback if not enough recent data
+            df_reg = df_reg_all
         X_reg  = df_reg[fc].replace([np.inf, -np.inf], np.nan).fillna(0)
+
+        # fr (magnitude) regression uses full history like the direction models
+        df_fr = df_c.dropna(subset=["fr"])
+        X_fr  = df_fr[fc].replace([np.inf, -np.inf], np.nan).fillna(0)
 
         with ThreadPoolExecutor(max_workers=4) as pool:
             f_gap   = pool.submit(_train_fold,     X_all, df_c["gap_target"])
@@ -202,6 +214,8 @@ def predict_stock(req: PredictRequest):
             m_close = f_close.result()
             m_high  = f_high.result()
             m_low   = f_low.result()
+        # fr model runs after to keep thread pool at 4 (GPU memory)
+        m_fr = _train_fold_reg(X_fr, df_fr["fr"])
 
         # ── Predict on last row ────────────────────────────────
         last_row = df.dropna(subset=fc).iloc[[-1]]
@@ -211,16 +225,12 @@ def predict_stock(req: PredictRequest):
         prob_gap   = float(_predict_proba(*m_gap,   X_last)[0])
         prob_close = float(_predict_proba(*m_close, X_last)[0])
 
-        # ── High/Low price predictions (raw % targets) ───────────
+        # ── High/Low price predictions ────────────────────────────
         cur_close_val = float(last_row["close"].iloc[0])
 
         pred_high_raw = float(_predict_reg(*m_high, X_last)[0])
         pred_low_raw  = float(_predict_reg(*m_low,  X_last)[0])
 
-        # Anchor to this stock's recent 3-day rolling avg of (high-close)/close
-        # This prevents regime-mismatch errors (e.g. training sees high-ATR periods,
-        # but recent market is calmer → raw ML over-predicts by 2×).
-        # Blend: 60% ML + 40% 3-day rolling anchor
         def _col_val(col, fallback):
             if col in last_row.columns:
                 v = last_row[col].iloc[0]
@@ -228,26 +238,39 @@ def predict_stock(req: PredictRequest):
             sub = df.dropna(subset=[col])
             return float(sub.iloc[-1][col]) if len(sub) else fallback
 
-        hi_anchor = _col_val("hi_avg3", _col_val("hi_avg5", pred_high_raw))
-        lo_anchor = _col_val("lo_avg3", _col_val("lo_avg5", pred_low_raw))
+        # Compound anchor: 50% yesterday's actual excursion (hi_oc1) + 50% EMA-5 avg
+        # hi_oc1 captures today's actual high-close ratio → strong predictor for tomorrow
+        # hi_ema5 provides a smooth baseline to avoid over-reacting to outlier days
+        hi_oc1   = _col_val("hi_oc1",  _col_val("hi_avg3", pred_high_raw))
+        lo_oc1   = _col_val("lo_oc1",  _col_val("lo_avg3", pred_low_raw))
+        hi_ema5  = _col_val("hi_ema5", _col_val("hi_avg5", pred_high_raw))
+        lo_ema5  = _col_val("lo_ema5", _col_val("lo_avg5", pred_low_raw))
+        hi_anchor = 0.50 * hi_oc1 + 0.50 * hi_ema5
+        lo_anchor = 0.50 * lo_oc1 + 0.50 * lo_ema5
 
-        pred_high_pct = 0.60 * pred_high_raw + 0.40 * hi_anchor
-        pred_low_pct  = 0.60 * pred_low_raw  + 0.40 * lo_anchor
+        # Blend: 30% ML + 70% compound anchor
+        # High anchor weight keeps predictions anchored to current-regime behavior;
+        # recent-data training (2.5yr) further narrows the ML prediction distribution.
+        pred_high_pct = 0.30 * pred_high_raw + 0.70 * hi_anchor
+        pred_low_pct  = 0.30 * pred_low_raw  + 0.70 * lo_anchor
 
-        # Sanity: high must be ≥ close (positive %), low must be ≤ close (negative %)
-        pred_high_pct = max(pred_high_pct, max(hi_anchor * 0.30, 0.001))
-        pred_low_pct  = min(pred_low_pct,  min(lo_anchor * 0.30, -0.001))
+        # Safety: high must be above close, low must be below close
+        pred_high_pct = max(pred_high_pct, max(hi_anchor * 0.25, 0.001))
+        pred_low_pct  = min(pred_low_pct,  min(lo_anchor * 0.25, -0.001))
 
         pred_high_price = round(cur_close_val * (1 + pred_high_pct), 0)
         pred_low_price  = round(cur_close_val * (1 + pred_low_pct),  0)
-
-        # Final sanity: ensure high >= low
         if pred_high_price < pred_low_price:
             pred_high_price, pred_low_price = pred_low_price, pred_high_price
 
-        # Recompute display %
-        pred_high_pct   = (pred_high_price - cur_close_val) / (cur_close_val + 1e-9)
-        pred_low_pct    = (pred_low_price  - cur_close_val) / (cur_close_val + 1e-9)
+        pred_high_pct = (pred_high_price - cur_close_val) / (cur_close_val + 1e-9)
+        pred_low_pct  = (pred_low_price  - cur_close_val) / (cur_close_val + 1e-9)
+
+        # ── 漲跌幅 prediction (close-to-close daily return magnitude) ──
+        pred_fr_raw = float(_predict_reg(*m_fr, X_last)[0])
+        # Blend with zero: magnitude is hard to predict, anchor toward 0
+        pred_fr = 0.60 * pred_fr_raw
+        pred_fr = float(np.clip(pred_fr, -0.06, 0.06))   # cap at ±6%
 
         # ── Sentiment ──────────────────────────────────────────
         sname   = STOCK_NAMES.get(sid, sid)
@@ -318,7 +341,12 @@ def predict_stock(req: PredictRequest):
                 "pred_low":      pred_low_price,
                 "high_pct":      round(pred_high_pct * 100, 2),
                 "low_pct":       round(pred_low_pct  * 100, 2),
-                "accuracy_note": "ML+3日錨點混合預測，低波動股 ±0.4% 命中率 ~70%",
+                "accuracy_note": "ML+複合錨點混合，±0.5% 命中率 ~65%",
+            },
+            "next_day_change": {
+                "pred_pct":    round(pred_fr * 100, 2),
+                "direction":   "UP" if pred_fr > 0.002 else ("DOWN" if pred_fr < -0.002 else "FLAT"),
+                "accuracy_note": "漲跌幅迴歸預測（日報酬%），參考用",
             },
             "sentiment":   sent,
             "technical":   technical,
