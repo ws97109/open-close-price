@@ -126,6 +126,34 @@ def _atr(h, l, c, n=14):
     return tr.ewm(com=n - 1, min_periods=n).mean()
 
 # ─────────────────────────────────────────────────────────────
+# REAL-TIME PRICE (yfinance — for intraday features during market hours)
+# ─────────────────────────────────────────────────────────────
+def fetch_realtime(sid: str) -> dict:
+    """
+    Fetch today's open + latest price via yfinance during Taiwan market hours.
+    Returns dict with keys: open, current, volume, or {} on failure.
+    Taiwan market: Mon–Fri 09:00–13:30 (UTC+8).
+    """
+    try:
+        import yfinance as yf
+        from datetime import datetime, timezone, timedelta
+        tw_now = datetime.now(timezone(timedelta(hours=8)))
+        # Only fetch during or just before trading day
+        if tw_now.weekday() >= 5:
+            return {}   # weekend
+        ticker = yf.Ticker(f"{sid}.TW")
+        hist = ticker.history(period="1d", interval="5m", auto_adjust=True)
+        if hist is None or hist.empty:
+            return {}
+        today_open = float(hist["Open"].iloc[0])
+        current    = float(hist["Close"].iloc[-1])
+        volume     = int(hist["Volume"].sum())
+        return {"open": today_open, "current": current, "volume": volume}
+    except Exception:
+        return {}
+
+
+# ─────────────────────────────────────────────────────────────
 # DATA LOADING
 # ─────────────────────────────────────────────────────────────
 _API: Optional[FMLoader] = None

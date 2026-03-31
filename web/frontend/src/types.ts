@@ -75,16 +75,38 @@ export interface NextDayChange {
   accuracy_note: string
 }
 
+export interface InstitutionalRow {
+  date: string
+  net: number
+}
+
+export interface Institutional {
+  name: string
+  latest_net: number
+  direction: string
+  history: InstitutionalRow[]
+}
+
+export interface HotStock {
+  id: string
+  name: string
+  close: number
+  change_pct: number
+  volume: number
+}
+
 export interface PredictResponse {
   stock: string
   stock_name: string
   as_of_date: string
-  price: PriceData
+  price: PriceData & { rt_open?: number; rt_current?: number; rt_active?: boolean }
   gap: PredictionSide
   close: PredictionSide
   close_d2: PredictionSide
   high_low: PriceRange
   next_day_change: NextDayChange
+  institutional: Institutional[]
+  realtime_note: string | null
   sentiment: Sentiment
   technical: TechnicalData
   top_features: FeatureImportance[]

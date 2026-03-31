@@ -28,7 +28,7 @@ import requests as _requests
 from finalmodel import (
     load_stock, load_spy, load_sector, engineer, build_targets, feat_cols,
     _train_fold, _predict_proba, _train_fold_reg, _predict_reg,
-    GAP_CONF_THR, CLOSE_CONF_THR, TRAIN_START,
+    GAP_CONF_THR, CLOSE_CONF_THR, TRAIN_START, fetch_realtime,
 )
 import sentiment as _sentiment
 
@@ -225,6 +225,26 @@ def predict_stock(req: PredictRequest):
         X_last   = last_row[fc].replace([np.inf, -np.inf], np.nan).fillna(0)
         as_of    = str(last_row["date"].iloc[0].date())
 
+        # ── Inject real-time open price (if market is open today) ──
+        rt = fetch_realtime(sid)
+        rt_active = False
+        if rt:
+            prev_close = float(last_row["close"].iloc[0])
+            rt_open_gap  = (rt["open"] - prev_close) / (prev_close + 1e-9)
+            rt_intra_ret = (rt["current"] - rt["open"]) / (rt["open"] + 1e-9)
+            X_rt = X_last.copy()
+            # Override gap and intraday features with real observed values
+            for col, val in [
+                ("gap",       rt_open_gap),
+                ("gap_open",  rt_open_gap),
+                ("intra_ret", rt_intra_ret),
+                ("gap_cont",  float(np.sign(rt_open_gap) * np.sign(rt_intra_ret))),
+            ]:
+                if col in X_rt.columns:
+                    X_rt[col] = val
+            X_last = X_rt
+            rt_active = True
+
         prob_gap   = float(_predict_proba(*m_gap,   X_last)[0])
         prob_close = float(_predict_proba(*m_close, X_last)[0])
         prob_d2    = float(_predict_proba(*m_d2,    X_last)[0])
@@ -297,12 +317,34 @@ def predict_stock(req: PredictRequest):
         # ── Current prices ─────────────────────────────────────
         last = df.iloc[-1]
         price = {
-            "date":  str(last["date"].date()),
-            "open":  float(last["open"])  if "open"  in df.columns else None,
-            "close": float(last["close"]) if "close" in df.columns else None,
-            "high":  float(last["high"])  if "high"  in df.columns else None,
-            "low":   float(last["low"])   if "low"   in df.columns else None,
+            "date":         str(last["date"].date()),
+            "open":         float(last["open"])  if "open"  in df.columns else None,
+            "close":        float(last["close"]) if "close" in df.columns else None,
+            "high":         float(last["high"])  if "high"  in df.columns else None,
+            "low":          float(last["low"])   if "low"   in df.columns else None,
+            "rt_open":      rt.get("open")     if rt_active else None,
+            "rt_current":   rt.get("current")  if rt_active else None,
+            "rt_active":    rt_active,
         }
+
+        # ── Three major institutional investors (三大法人) last 5 days ──
+        inst_cols = [c for c in df.columns if c.startswith("inst_") and not any(
+            s in c for s in ["s3","s5","s10","s20","r","l1","l2"])]
+        institutional = []
+        for col in inst_cols:
+            name_raw = col.replace("inst_", "").replace("_", " ").strip()
+            recent = df[["date", col]].dropna().tail(5)
+            if recent.empty:
+                continue
+            rows = [{"date": str(r["date"].date()), "net": int(r[col])}
+                    for _, r in recent.iterrows()]
+            latest_net = int(recent.iloc[-1][col])
+            institutional.append({
+                "name":   name_raw,
+                "latest_net": latest_net,
+                "direction":  "買超" if latest_net > 0 else ("賣超" if latest_net < 0 else "持平"),
+                "history": rows,
+            })
 
         # ── Technical snapshot ─────────────────────────────────
         lrow = last_row.iloc[0]
@@ -360,6 +402,8 @@ def predict_stock(req: PredictRequest):
                 "raw_prob":    round(prob_d2, 4),
                 "accuracy_note": "後天收盤漲跌方向",
             },
+            "institutional": institutional,
+            "realtime_note": f"盤中更新：開盤 {rt['open']:.0f} / 現價 {rt['current']:.0f}" if rt_active else None,
             "sentiment":   sent,
             "technical":   technical,
             "top_features": top_feats,
@@ -639,6 +683,56 @@ def chart_data(stock_id: str, days: int = 120, token: Optional[str] = None):
 
     except Exception as exc:
         import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+_HOT_STOCKS = [
+    "2330","2454","2317","2308","2303","2382","2412","2886","2881","2882",
+    "2891","2884","2885","3711","3008","2395","2002","1301","1303","6505",
+    "0050","0056","2912","2308","2892","1216","2367","2002",
+]
+_hot_cache: dict = {}   # {date_str: list}
+
+@app.get("/api/market/hot")
+def market_hot():
+    """Return top stocks by today's trading volume, with realtime price and change."""
+    today_str = date.today().strftime("%Y-%m-%d")
+    if today_str in _hot_cache:
+        return _hot_cache[today_str]
+    try:
+        import yfinance as yf
+        unique_ids = list(dict.fromkeys(_HOT_STOCKS))  # dedup, preserve order
+        tickers_tw = [f"{s}.TW" for s in unique_ids]
+        data = yf.download(tickers_tw, period="2d", interval="1d",
+                           progress=False, auto_adjust=True)
+        results = []
+        for sid in unique_ids:
+            tw = f"{sid}.TW"
+            try:
+                vol   = data["Volume"][tw].dropna()
+                close = data["Close"][tw].dropna()
+                open_ = data["Open"][tw].dropna()
+                if vol.empty or close.empty:
+                    continue
+                today_vol   = int(vol.iloc[-1])
+                today_close = float(close.iloc[-1])
+                today_open  = float(open_.iloc[-1])
+                prev_close  = float(close.iloc[-2]) if len(close) >= 2 else today_open
+                chg_pct     = (today_close - prev_close) / (prev_close + 1e-9) * 100
+                results.append({
+                    "id":       sid,
+                    "name":     STOCK_NAMES.get(sid, sid),
+                    "close":    round(today_close, 2),
+                    "change_pct": round(chg_pct, 2),
+                    "volume":   today_vol,
+                })
+            except Exception:
+                continue
+        results.sort(key=lambda x: -x["volume"])
+        out = results[:20]
+        _hot_cache[today_str] = out
+        return out
+    except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
 

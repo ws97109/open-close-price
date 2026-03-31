@@ -1,7 +1,7 @@
 import './style.css'
 import { predict, analyzeStream } from './api'
 import { fetchChartData, renderChart } from './chart'
-import type { PredictResponse, Signal, TechnicalData, SentimentArticle, PriceRange, NextDayChange } from './types'
+import type { PredictResponse, Signal, TechnicalData, SentimentArticle, PriceRange, NextDayChange, HotStock, Institutional } from './types'
 
 const QUICK_STOCKS = [
   { id: '2412', name: '中華電信' }, { id: '2330', name: '台積電' },
@@ -248,8 +248,25 @@ function renderResult(d: PredictResponse): string {
       <div class="ai-placeholder">點擊「開始分析」，AI 將結合技術面、籌碼面與最新新聞給出綜合判斷。</div>
     </div>
 
+    <!-- Institutional investors -->
+    ${d.institutional && d.institutional.length > 0 ? `
+    <div class="section-title">三大法人 <span class="title-sub">（最新一日買賣超）</span></div>
+    <div class="tech-grid">
+      ${d.institutional.map((inst: Institutional) => {
+        const cls = inst.latest_net > 0 ? 'val-up' : inst.latest_net < 0 ? 'val-down' : ''
+        const n = Math.abs(inst.latest_net) >= 1000
+          ? (inst.latest_net / 1000).toFixed(1) + 'K'
+          : inst.latest_net.toLocaleString()
+        return `<div class="tech-row">
+          <span class="tl">${inst.name}</span>
+          <span class="tv ${cls}">${inst.direction} ${inst.latest_net >= 0 ? '+' : ''}${n}</span>
+        </div>`
+      }).join('')}
+    </div>` : ''}
+
     <!-- Disclaimer -->
     <div class="disclaimer">
+      ${d.realtime_note ? `🟢 <strong>${d.realtime_note}</strong>（已注入盤中特徵）<br>` : ''}
       ⚠ 開盤跳空 84%（conf&gt;70%）· 收盤方向 ~67%（conf&gt;70%）· 高低價 ±1% 命中率 94%+
       · 信心度門檻均為 70%，低於此值顯示「觀望」 · 以上資訊僅供研究參考，不構成投資建議
     </div>
@@ -352,6 +369,50 @@ async function loadChart(stockId: string): Promise<void> {
   }
 }
 
+// ─── Hot stocks panel ──────────────────────────────────────────
+async function loadHotStocks(): Promise<void> {
+  const el = document.getElementById('hot-stocks-panel')
+  if (!el) return
+  try {
+    const res = await fetch('/api/market/hot')
+    if (!res.ok) return
+    const stocks: HotStock[] = await res.json()
+    el.innerHTML = `
+      <div class="section-title" style="border-top:none;padding-top:0">
+        🔥 熱門股票
+        <span class="title-sub">依成交量排名（即時）</span>
+      </div>
+      <div class="hot-table">
+        <div class="hot-head">
+          <span>代碼</span><span>名稱</span><span>現價</span><span>漲跌</span><span>成交量</span>
+        </div>
+        ${stocks.map(s => {
+          const cls = s.change_pct > 0 ? 'val-up' : s.change_pct < 0 ? 'val-down' : ''
+          const chg = s.change_pct >= 0 ? `+${s.change_pct.toFixed(2)}%` : `${s.change_pct.toFixed(2)}%`
+          const vol = s.volume >= 1e8 ? (s.volume/1e8).toFixed(1)+'億'
+                    : s.volume >= 1e4 ? (s.volume/1e4).toFixed(0)+'萬' : s.volume.toLocaleString()
+          return `<div class="hot-row" data-sid="${s.id}">
+            <span class="hot-id">${s.id}</span>
+            <span class="hot-name">${s.name}</span>
+            <span class="hot-price">${s.close}</span>
+            <span class="hot-chg ${cls}">${chg}</span>
+            <span class="hot-vol">${vol}</span>
+          </div>`
+        }).join('')}
+      </div>`
+    // Click to fill search input
+    el.querySelectorAll<HTMLElement>('.hot-row').forEach(row => {
+      row.addEventListener('click', () => {
+        const sid = row.dataset.sid!
+        ;(document.getElementById('stock-input') as HTMLInputElement).value = sid
+        document.getElementById('stock-input')!.focus()
+      })
+    })
+  } catch (_) {
+    el.innerHTML = ''
+  }
+}
+
 // ─── Init ──────────────────────────────────────────────────────
 function init(): void {
   const container = document.getElementById('quick-stocks')!
@@ -368,6 +429,8 @@ function init(): void {
   document.getElementById('predict-btn')!.addEventListener('click', runPredict)
   const input = document.getElementById('stock-input') as HTMLInputElement
   input.addEventListener('keydown', (e) => { if (e.key === 'Enter') runPredict() })
+
+  loadHotStocks()
 }
 
 init()
