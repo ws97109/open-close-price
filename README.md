@@ -1,4 +1,4 @@
-# 台灣股票開盤預測系統
+# Taiwan stoc
 
 AI-powered Taiwan stock **opening gap & close direction** prediction system with real-time news sentiment and LLM analysis.
 
